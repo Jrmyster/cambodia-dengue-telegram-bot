@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { common, locales } from '../locales.js';
 import { directory } from './referrals.js';
+import { OUTCOME_EVENTS } from './analytics.js';
+import { locationTransition, renderLocation, startLocation } from './location-flow.js';
 
 export const WARNINGS = 5;
 export const fresh = () => ({ nonce: randomBytes(6).toString('hex'), rev: 0, stage: 'language', lang: null, answers: {}, warning: 0 });
@@ -9,7 +11,7 @@ const button = (s, text, action, value) => ({ text, callback_data: callback(s, a
 const message = (text, rows = []) => ({ text, extra: { reply_markup: { inline_keyboard: rows }, link_preview_options: { is_disabled: true } } });
 const langs = s => [[button(s, '🇰🇭 ភាសាខ្មែរ', 'language', 'km')], [button(s, '🇬🇧 English', 'language', 'en')]];
 const nav = (s, t) => [[button(s, t.emergency, 'emergency')], [button(s, t.cancel, 'cancel')]];
-const home = (s, t) => [[button(s, t.restart, 'start')], [button(s, t.prevention, 'prevention')], ...nav(s, t)];
+const home = (s, t) => [[button(s, t.restart, 'start')], [button(s, t.prevention, 'prevention')], ...nav(s, t), [button(s, t.shareLocation, 'location')]];
 const yesNo = (s, t, action) => ['yes', 'no', 'unsure'].map(v => [button(s, t[v], action, v)]);
 
 // Referral tiers are a conservative product policy, NOT a validated WHO score.
@@ -27,8 +29,9 @@ export function categorize(a) {
 export function render(s) {
   if (!s.lang) return [message(`${common.chooseLanguage}\n\n${common.urgent}`, langs(s))];
   const t = locales[s.lang];
+  if (s.locationRequest) return renderLocation(s, t);
   switch (s.stage) {
-    case 'intro': return [message(t.intro, [[button(s, t.begin, 'begin')], ...nav(s, t)])];
+    case 'intro': return [message(`${t.intro}\n\n${t.analyticsNotice}`, [[button(s, t.begin, 'begin')], ...nav(s, t)])];
     case 'fever': return [message(t.fever, [...Object.entries(t.feverChoices).map(([v, text]) => [button(s, text, 'fever', v)]), ...nav(s, t)])];
     case 'duration': return [message(t.duration, [...Object.entries(t.durationChoices).map(([v, text]) => [button(s, text, 'duration', v)]), ...nav(s, t)])];
     case 'warning': return [message(`${t.warningIntro}\n\n${s.warning + 1}/${WARNINGS}: ${t.warnings[s.warning]}`, [...yesNo(s, t, 'warning'), ...nav(s, t)])];
@@ -47,8 +50,17 @@ function emergency(s, area) {
   return [message(`${t.emergencyIntro.split('\n\n')[0]}\n\n${d.text}`, [...d.buttons, [button(s, t.back, 'emergency')], [button(s, t.resume, 'resume')]])];
 }
 
+function referral(s) {
+  const t = locales[s.lang];
+  const rows = Object.entries(t.areas).map(([v, text]) => [button(s, text, 'area', v)]);
+  return [message(t.healthCenterReferral, [...rows, [button(s, t.resume, 'resume')], ...nav(s, t)])];
+}
+
+const referralEvent = (region = 'unknown', region_basis = 'not_reported') => [{ event_type: 'REFERRAL_CONTACT_REQUEST', region, region_basis }];
+
 function finish(s, result) {
   s.stage = 'result'; s.result = result;
+  delete s.locationRequest;
   s.answers = {}; // No symptom history retained after categorization.
 }
 
@@ -69,21 +81,27 @@ export function transition(current, event) {
   }
   if (action === 'start') { s = fresh(); return { state: s, clear: true, messages: render(s) }; }
   if (!s.lang && action !== 'language') {
-    s.pending = ['emergency', 'prevention', 'help'].includes(action) ? action : 'intro';
+    s.pending = ['emergency', 'prevention', 'help', 'location', 'location_pin', 'referral'].includes(action) ? action : 'intro';
     // /emergency delivers ambulance guidance BEFORE asking for language.
     return { state: s, messages: render(s) };
   }
   if (action === 'language' && s.stage === 'language' && ['en', 'km'].includes(value)) {
     s.lang = value; s.stage = 'intro'; s.rev++;
     const pending = s.pending; delete s.pending;
-    if (pending === 'emergency') return { state: s, messages: emergency(s) };
-    if (pending === 'prevention' || pending === 'help') return { state: s, messages: [message(locales[s.lang][pending === 'help' ? 'help' : 'preventionText'], home(s, locales[s.lang]))] };
+    if (pending === 'location' || pending === 'location_pin') return startLocation(s, locales[s.lang]);
+    if (pending === 'emergency' || pending === 'referral') return { state: s, messages: pending === 'referral' ? referral(s) : emergency(s), analytics: referralEvent() };
+    if (pending === 'prevention' || pending === 'help') return { state: s, messages: [message(pending === 'help' ? `${locales[s.lang].help}\n\n${locales[s.lang].analyticsNotice}` : locales[s.lang].preventionText, home(s, locales[s.lang]))] };
     return { state: s, messages: render(s) };
   }
   const t = locales[s.lang || 'en'];
-  if (action === 'emergency') return { state: s, messages: emergency(s) };
-  if (action === 'area' && Object.hasOwn(t.areas, value)) return { state: s, messages: emergency(s, value) };
-  if (action === 'prevention' || action === 'help') return { state: s, messages: [message(t[action === 'help' ? 'help' : 'preventionText'], [[button(s, t.resume, 'resume')], ...home(s, t)])] };
+  if (['emergency', 'referral', 'resume', 'prevention', 'help'].includes(action) && s.locationRequest) {
+    delete s.locationRequest; s.rev++;
+  }
+  const locationResult = locationTransition(s, t, action, value, event);
+  if (locationResult) return locationResult;
+  if (action === 'emergency' || action === 'referral') return { state: s, messages: action === 'referral' ? referral(s) : emergency(s), analytics: referralEvent() };
+  if (action === 'area' && Object.hasOwn(t.areas, value)) return { state: s, messages: emergency(s, value), analytics: referralEvent(value === 'other' ? 'unknown' : value, 'requested_care_area') };
+  if (action === 'prevention' || action === 'help') return { state: s, messages: [message(action === 'help' ? `${t.help}\n\n${t.analyticsNotice}` : t.preventionText, [[button(s, t.resume, 'resume')], ...home(s, t)])] };
   if (action === 'resume') return { state: s, messages: render(s) };
   let valid = true;
   if (action === 'begin' && s.stage === 'intro') s.stage = 'fever';
@@ -103,5 +121,7 @@ export function transition(current, event) {
     s.answers.hydration = value; finish(s, categorize(s.answers));
   } else valid = false;
   if (valid) s.rev++;
-  return { state: s, messages: [...(!valid ? [message(t.fallback)] : []), ...render(s)] };
+  const analytics = valid && s.stage === 'result' && current?.stage !== 'result'
+    ? [{ event_type: OUTCOME_EVENTS[s.result], region: 'unknown', region_basis: 'not_reported' }] : [];
+  return { state: s, analytics, messages: [...(!valid ? [message(t.fallback)] : []), ...render(s)] };
 }

@@ -3,6 +3,8 @@ import { createHmac } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { transition } from './flow.js';
+import { dailyAnalyticsHash, reportingDay, EVENT_TYPES, PROVINCES, LOCATION_RETENTION_DAYS, EVENT_RETENTION_DAYS } from './analytics.js';
+import { locales } from '../locales.js';
 
 const DAY = 86400000;
 export class Store {
@@ -16,12 +18,51 @@ export class Store {
         payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL, created INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS outbox_due ON outbox(due);
       CREATE INDEX IF NOT EXISTS outbox_key ON outbox(key,id);
-      CREATE TABLE IF NOT EXISTS limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS analytics_events (
+        day TEXT NOT NULL, recorded_at INTEGER NOT NULL,
+        event_type TEXT NOT NULL CHECK(event_type IN ('RED_FLAG_ESCALATION','YELLOW_MONITORING','URGENT_ASSESSMENT','GREEN_PREVENTION','REFERRAL_CONTACT_REQUEST')),
+        region TEXT NOT NULL, region_basis TEXT NOT NULL CHECK(region_basis IN ('not_reported','requested_care_area')),
+        count INTEGER NOT NULL CHECK(count>0), PRIMARY KEY(day,event_type,region,region_basis));
+      CREATE TABLE IF NOT EXISTS location_reports (
+        day TEXT NOT NULL, recorded_at INTEGER NOT NULL, province TEXT NOT NULL,
+        cell TEXT NOT NULL, latitude REAL, longitude REAL,
+        report_count INTEGER NOT NULL CHECK(report_count>0), PRIMARY KEY(day,province,cell),
+        CHECK((cell='province_only' AND latitude IS NULL AND longitude IS NULL) OR
+          (cell!='province_only' AND latitude IS NOT NULL AND longitude IS NOT NULL AND latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180)));
+      CREATE TABLE IF NOT EXISTS analytics_dedup (
+        daily_hash TEXT PRIMARY KEY CHECK(length(daily_hash)=64), expires INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS analytics_dedup_expiry ON analytics_dedup(expires);`);
   }
   key(chatId) { return createHmac('sha256', this.secret).update(String(chatId)).digest('hex'); }
   get(chatId) {
     const r = this.db.prepare('SELECT state FROM sessions WHERE key=? AND expires>?').get(this.key(chatId), this.now());
     return r ? JSON.parse(r.state) : null;
+  }
+  recordAnalytics(chatId, now, result) {
+    const { day, start } = reportingDay(now);
+    const firstToday = purpose => this.db.prepare('INSERT OR IGNORE INTO analytics_dedup VALUES (?,?)')
+      .run(dailyAnalyticsHash(this.secret, chatId, now, purpose), start + 2 * DAY).changes === 1;
+    for (const e of result.analytics || []) {
+      if (!EVENT_TYPES.includes(e.event_type) || !PROVINCES.includes(e.region) || !['not_reported', 'requested_care_area'].includes(e.region_basis)) throw new Error('Invalid analytics dimension');
+      // A CHW may assess several patients in one day: count distinct assessments,
+      // but not repeated buttons within one assessment. These are not case counts.
+      if (!firstToday(JSON.stringify([e.event_type, e.region, e.region_basis, result.state.nonce]))) continue;
+      this.db.prepare(`INSERT INTO analytics_events VALUES (?,?,?,?,?,1)
+        ON CONFLICT(day,event_type,region,region_basis) DO UPDATE SET count=count+1`)
+        .run(day, start, e.event_type, e.region, e.region_basis);
+    }
+    if (result.locationReport) {
+      const p = result.locationReport;
+      if (!PROVINCES.includes(p.province)) throw new Error('Invalid reporting province');
+      if (!firstToday('location')) {
+        result.messages[0].text = locales[result.state.lang].locationAlreadyShared;
+        return;
+      }
+      this.db.prepare(`INSERT INTO location_reports VALUES (?,?,?,?,?,?,1)
+        ON CONFLICT(day,province,cell) DO UPDATE SET report_count=report_count+1`)
+        .run(day, start, p.province, p.cell, p.latitude, p.longitude);
+    }
   }
   accept(updateId, chatId, event) {
     const now = this.now(), key = this.key(chatId);
@@ -34,8 +75,10 @@ export class Store {
       const privileged = event.command === 'emergency' || event.command === 'cancel' || /:(emergency|area|cancel):/.test(event.data || '') || /:warning:yes$/.test(event.data || '');
       if (limit?.count >= 40 && !privileged) { this.db.exec('COMMIT'); return 'limited'; }
       this.db.prepare('INSERT OR REPLACE INTO limits VALUES (?,?,?)').run(key, (limit?.count || 0) + 1, limit?.expires || now + 60000);
-      const result = transition(this.get(chatId), event);
-      if (result.clear || result.state?.result === 'red') this.db.prepare('DELETE FROM outbox WHERE key=?').run(key);
+      const previous = this.get(chatId);
+      const result = transition(previous, event);
+      this.recordAnalytics(chatId, now, result);
+      if (result.clear || (result.state?.result === 'red' && previous?.result !== 'red')) this.db.prepare('DELETE FROM outbox WHERE key=?').run(key);
       if (result.state) {
         this.db.prepare('INSERT OR REPLACE INTO sessions VALUES (?,?,?)').run(key, JSON.stringify(result.state), now + this.ttl);
       } else this.db.prepare('DELETE FROM sessions WHERE key=?').run(key);
@@ -64,6 +107,10 @@ export class Store {
     this.db.prepare('DELETE FROM sessions WHERE expires<=?').run(now);
     this.db.prepare('DELETE FROM updates WHERE expires<=?').run(now);
     this.db.prepare('DELETE FROM limits WHERE expires<=?').run(now);
+    this.db.prepare('DELETE FROM analytics_dedup WHERE expires<=?').run(now);
+    const start = reportingDay(now).start;
+    this.db.prepare('DELETE FROM location_reports WHERE recorded_at<=?').run(start - LOCATION_RETENTION_DAYS * DAY);
+    this.db.prepare('DELETE FROM analytics_events WHERE recorded_at<=?').run(start - EVENT_RETENTION_DAYS * DAY);
     // Never deliver potentially misleading old triage after a prolonged outage.
     const expired = this.db.prepare('DELETE FROM outbox WHERE created<=?').run(now - this.ttl).changes;
     this.db.exec('PRAGMA wal_checkpoint(PASSIVE)');

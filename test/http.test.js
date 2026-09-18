@@ -53,6 +53,60 @@ test('real Telegraf handlers complete a Khmer emergency flow using synthetic upd
   assert.equal(store.get(55).result, 'red');
   assert.equal(store.stats().pending, 1); // Urgent message supersedes unsent prompts.
   assert.match(JSON.parse(store.next().payload).text, /🔴/);
+  assert.equal(store.db.prepare("SELECT count FROM analytics_events WHERE event_type='RED_FLAG_ESCALATION'").get().count, 1);
+});
+
+test('real Telegram location handler requires opt-in and strips identity and exact coordinates', async t => {
+  const { store, post } = await setup(t);
+  let id = 100;
+  const tap = async (action, value) => post({ update_id: ++id, callback_query: { id: `location${id}`, chat_instance: 'test',
+    from: { id: 55, is_bot: false, first_name: 'PRIVATE_FIRST_NAME' }, data: callback(store.get(55), action, value),
+    message: { message_id: id, date: 1, chat: { id: 55, type: 'private' }, text: 'question' } } });
+  const pin = () => ({ update_id: ++id, message: { message_id: id, date: 1,
+    chat: { id: 55, type: 'private', username: 'PRIVATE_USERNAME' },
+    from: { id: 55, is_bot: false, first_name: 'PRIVATE_FIRST_NAME', username: 'PRIVATE_USERNAME' },
+    location: { latitude: 11.556417, longitude: 104.928263, horizontal_accuracy: 7 },
+    contact: { phone_number: 'PRIVATE_PHONE', first_name: 'PRIVATE_CONTACT' } } });
+  assert.equal((await post(pin())).status, 200);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM location_reports').get().n, 0);
+  await tap('language', 'km'); await tap('province', 'pp');
+  const accepted = pin();
+  assert.equal((await post(accepted)).status, 200); await post(accepted);
+  const entry = store.db.prepare('SELECT * FROM location_reports').get();
+  assert.equal(entry.latitude, 11.55); assert.equal(entry.longitude, 104.95); assert.equal(entry.report_count, 1);
+  assert.equal(store.get(55).lang, 'km');
+  assert.equal(store.get(55).locationRequest, undefined);
+  const persisted = JSON.stringify([
+    ...store.db.prepare('SELECT * FROM location_reports').all(),
+    ...store.db.prepare('SELECT * FROM analytics_events').all(),
+    ...store.db.prepare('SELECT * FROM analytics_dedup').all(),
+    ...store.db.prepare('SELECT state FROM sessions').all(),
+    ...store.db.prepare('SELECT payload FROM outbox').all(),
+  ]);
+  for (const forbidden of ['PRIVATE_USERNAME', 'PRIVATE_FIRST_NAME', 'PRIVATE_PHONE', 'PRIVATE_CONTACT', '11.556417', '104.928263', 'horizontal_accuracy']) assert.ok(!persisted.includes(forbidden));
+});
+
+test('location handling rejects live/forwarded pins and ignores group or edited locations', async t => {
+  const { store, post } = await setup(t);
+  await post(update(200, '/location'));
+  let id = 200;
+  for (const [action, value] of [['language', 'en'], ['province', 'sr']]) {
+    await post({ update_id: ++id, callback_query: { id: `cb${id}`, chat_instance: 'test',
+      from: { id: 55, is_bot: false, first_name: 'Test' }, data: callback(store.get(55), action, value),
+      message: { message_id: id, date: 1, chat: { id: 55, type: 'private' }, text: 'question' } } });
+  }
+  const base = { message_id: 999, date: 1, chat: { id: 55, type: 'private' }, from: { id: 55, is_bot: false, first_name: 'Test' }, location: { latitude: 13.36, longitude: 103.85 } };
+  for (const message of [
+    { ...base, location: { ...base.location, live_period: 900 } },
+    { ...base, forward_origin: { type: 'user', sender_user: { id: 999, first_name: 'Other' }, date: 1 } },
+    { ...base, location: { latitude: '13.36', longitude: 103.85 } },
+    { ...base, location: null },
+    { ...base, chat: { id: -100, type: 'group' } },
+    { ...base, from: { id: 999, is_bot: false, first_name: 'Other' } },
+  ]) assert.equal((await post({ update_id: ++id, message })).status, 200);
+  await post({ update_id: ++id, edited_message: base });
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM location_reports').get().n, 0);
+  assert.equal(store.get(55).locationRequest.step, 'pin');
 });
 test('groups, edited messages and channel posts cannot collect clinical data', async t => {
   const { store, post } = await setup(t);

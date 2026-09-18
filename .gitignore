@@ -13,6 +13,7 @@ data/
 *.sqlite
 *.sqlite*
 coverage/
+reports/
 
 # Logs & System Files
 npm-debug.log*

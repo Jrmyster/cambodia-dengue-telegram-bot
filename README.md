@@ -1,6 +1,6 @@
 # Cambodia dengue referral bot
 
-A complete Node.js 24 application using **Telegraf + Express**, English and Khmer Unicode dictionaries, inline keyboards, a finite state machine, and persistent SQLite state/reply delivery. No images, location tracking, AI calls, or external clinical API is needed during an assessment.
+A complete Node.js 24 application using **Telegraf + Express**, English and Khmer Unicode dictionaries, inline keyboards, a finite state machine, and persistent SQLite state/reply delivery. Assessments need no images, GPS, AI calls, or external clinical API. Optional one-time location contributions and detached aggregate reporting are described in [ANALYTICS.md](ANALYTICS.md); live location tracking is not supported.
 
 **Deployment status:** implemented and tested locally with synthetic Telegram updates. No real bot token was supplied, so a live Telegram conversation and cloud deployment have not been tested. This is referral-support software, not a validated diagnostic device. Have a Cambodian clinician and a native Khmer clinical reviewer approve the wording and local referral policy before patient-facing rollout. Provincial directory entries are explicitly marked historical until locally reconfirmed.
 
@@ -16,12 +16,16 @@ src/delivery.js          Durable outbound replies, retry/backoff and rate handli
 src/bot.js               Telegraf commands and callbacks; private chats only
 src/server.js            Express webhook, secret verification, health endpoints
 src/config.js            Validated environment settings
+src/analytics.js         Daily keyed dedup, coarse grid and aggregate reporting
+src/location-flow.js     Optional province/pin consent and validation flow
+scripts/report.js        Read-only internal report with small counts suppressed
 test/                    Clinical paths, persistence, delivery and HTTP tests
 .env.example             Local configuration template
 package.json             Dependencies and commands
 package-lock.json        Exact installed dependency versions
 Dockerfile / render.yaml Render deployment configuration
 CLINICAL_NOTES.md        Policy decisions, evidence and directory review notes
+ANALYTICS.md             Reporting schema, privacy, retention and rollout
 ```
 
 ## Local setup
@@ -72,8 +76,10 @@ Local health endpoints: `http://localhost:3000/healthz` (process alive) and `/re
 | `/emergency` | Immediate ambulance guidance, then area/referral buttons |
 | `/cancel` | Clear active bot answers and unsent replies |
 | `/help` | Show commands and urgent-care instructions |
+| `/location` | Optional coarse location or province-only contribution |
+| `/referral` | Health Center referral guidance and available hospital contacts |
 
-No typing is required after `/start`. Question and utility screens include navigation buttons. Emergency and prevention pages preserve the current assessment. If either command is used before language selection, the bot shows bilingual emergency guidance immediately and opens the requested page after a language tap.
+No typing is required after `/start`. Question and utility screens include navigation buttons. Emergency and prevention pages preserve the current assessment. If either command is used before language selection, the bot shows bilingual emergency guidance immediately and opens the requested page after a language tap. Optional `/location` first explains reporting and asks for a province; a static pin can then be attached or skipped with the province-only button. It is not part of triage and must never delay emergency care.
 
 ## Triage behavior
 
@@ -119,6 +125,7 @@ The same Docker image can run on another host with public HTTPS, environment sec
 - **Throughput:** one worker, approximately 16 messages/second maximum before API latency, at least 1.1 seconds between queued messages to one chat. A delayed chat does not block other chats except during Telegram's global 429 cooldown. A 40-updates/minute per-chat burst cap excludes emergency/cancel and positive warning callbacks. Excess ordinary requests are ignored until the next window; limited callbacks display a localized notification.
 - **Emergency priority:** a red result replaces that chat's unsent messages. A send already in flight cannot be recalled. `/start` and `/cancel` also clear pending replies, except a send already in flight.
 - **Retention:** active answers expire after 30 minutes of inactivity (configurable 5–60). The session key is an HMAC of the private chat ID. Answer details are cleared when the result is computed, while the result tier remains until expiry/cancel. The outbox temporarily stores the chat ID and rendered response until delivery or expiry. Update deduplication stores only IDs and expiry timestamps; burst limits retain pseudonymous keys for one minute.
+- **Aggregate reporting:** separate tables store daily outcome/referral counts (365 reporting days) and voluntary coarse-grid/province counts (90 reporting days), without Telegram identities or links to individual assessments. Purpose-specific daily HMAC dedup markers expire within 24–48 hours. Operational retention above is unchanged. See [ANALYTICS.md](ANALYTICS.md) for consent, limits and `npm run report`.
 - **Outage policy:** queued clinical text expires after the same TTL instead of arriving as old triage advice after a prolonged outage. Purging runs every minute while the worker is active, so physical cleanup may lag the TTL by approximately a minute or until the process recovers. Expired unsent replies log a count; they are not silently described as delivered. Users can restart with `/start` or `/resume`.
 - **Logging:** structured operational events only. Do not enable Telegraf debug logging, request-body capture, or proxy logging of secrets. No raw message text, names, phone numbers, usernames, or medical records are stored as input. Free text is not clinically analyzed and receives button guidance.
 - **Data protection:** restrict disk access and use host disk encryption. SQLite `secure_delete` and WAL checkpoints reduce remnants but do not guarantee secure erasure from disks, snapshots or backups. Telegram chat history is separate and is not removed by `/cancel`. Do not tell users this is an end-to-end encrypted medical record channel.

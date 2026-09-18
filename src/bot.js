@@ -9,7 +9,7 @@ export function createBot(token, store) {
     await next();
   });
   const accept = (ctx, event) => store.accept(ctx.update.update_id, ctx.chat.id, event);
-  for (const command of ['start', 'resume', 'prevention', 'emergency', 'cancel', 'help']) {
+  for (const command of ['start', 'resume', 'prevention', 'emergency', 'cancel', 'help', 'location', 'referral']) {
     bot.command(command, ctx => { accept(ctx, { command }); });
   }
   bot.on('callback_query', ctx => {
@@ -21,6 +21,16 @@ export function createBot(token, store) {
     void bot.telegram.answerCbQuery(ctx.callbackQuery.id, result === 'limited' ? locales[lang].busy : undefined)
       .catch(() => { /* expired callback or transient Telegram failure */ });
   });
+  bot.on('location', ctx => {
+    const pin = ctx.message.location ?? {};
+    // Allowlist only: do not send names, Telegram IDs, forwarded sender objects,
+    // live tracking metadata, captions, phone numbers or full updates to analytics.
+    accept(ctx, { command: 'location_pin', location: {
+      latitude: pin.latitude, longitude: pin.longitude,
+      live: pin.live_period !== undefined || pin.heading !== undefined || pin.proximity_alert_radius !== undefined,
+      forwarded: Boolean(ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_from_chat || ctx.message.forward_sender_name),
+    } });
+  });
   bot.on('message', ctx => { accept(ctx, { command: 'unknown' }); });
   // Propagate storage failures so Telegram retries webhook delivery.
   bot.catch(error => { throw error; });
@@ -28,7 +38,7 @@ export function createBot(token, store) {
 }
 
 export async function registerCommands(bot) {
-  const names = ['start', 'resume', 'prevention', 'emergency', 'cancel', 'help'];
+  const names = ['start', 'resume', 'prevention', 'emergency', 'cancel', 'help', 'location', 'referral'];
   for (const language of ['', 'en', 'km']) {
     const t = locales[language || 'en'];
     await bot.telegram.setMyCommands(names.map((command, i) => ({ command, description: t.commandDescriptions[i] })),

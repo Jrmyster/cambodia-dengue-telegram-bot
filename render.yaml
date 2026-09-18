@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: cambodia-dengue-bot
+    runtime: docker
+    plan: 0.5c-512mb
+    healthCheckPath: /readyz
+    numInstances: 1
+    envVars:
+      - key: BOT_MODE
+        value: webhook
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: SESSION_KEY_SECRET
+        generateValue: true
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: PUBLIC_URL
+        sync: false
+      - key: DATABASE_PATH
+        value: /app/data/bot.sqlite
+    disk:
+      name: bot-data
+      mountPath: /app/data
+      sizeGB: 1

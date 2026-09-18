@@ -1,0 +1,19 @@
+{
+  "name": "cambodia-dengue-triage-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Khmer and English dengue referral support with Telegraf and Express",
+  "engines": { "node": ">=24.15.0 <25" },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test",
+    "check": "node --check index.js && node --test"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "telegraf": "4.16.3"
+  }
+}

@@ -12,14 +12,26 @@ export function createBot(token, store) {
   for (const command of ['start', 'resume', 'prevention', 'emergency', 'cancel', 'help', 'location', 'referral']) {
     bot.command(command, ctx => { accept(ctx, { command }); });
   }
-  bot.on('callback_query', ctx => {
+  bot.on('callback_query', async ctx => {
     const data = ctx.callbackQuery.data;
-    if (typeof data !== 'string' || Buffer.byteLength(data) > 64) return;
-    const result = accept(ctx, { data });
-    // Persist the answer first. Callback acknowledgement is best effort, not a clinical reply.
-    const lang = store.get(ctx.chat.id)?.lang || 'en';
-    void bot.telegram.answerCbQuery(ctx.callbackQuery.id, result === 'limited' ? locales[lang].busy : undefined)
-      .catch(() => { /* expired callback or transient Telegram failure */ });
+    let result;
+    try {
+      result = accept(ctx, typeof data === 'string' && Buffer.byteLength(data) <= 64
+        ? { data } : { command: 'unknown' });
+    } finally {
+      // Acknowledge every tap, including malformed/expired buttons and storage failures.
+      // Bound this best-effort API call below the middleware timeout; the durable reply
+      // queue is independent of the spinner and must survive an acknowledgement failure.
+      const lang = ctx.from.language_code === 'km' ? 'km' : 'en';
+      let timer;
+      try {
+        await Promise.race([
+          ctx.answerCbQuery(result === 'limited' ? locales[lang].busy : undefined),
+          new Promise(resolve => { timer = setTimeout(resolve, 2000); }),
+        ]);
+      } catch { /* Telegram may reject old queries or be temporarily unreachable. */ }
+      finally { clearTimeout(timer); }
+    }
   });
   bot.on('location', ctx => {
     const pin = ctx.message.location ?? {};
@@ -30,6 +42,11 @@ export function createBot(token, store) {
       live: pin.live_period !== undefined || pin.heading !== undefined || pin.proximity_alert_radius !== undefined,
       forwarded: Boolean(ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_from_chat || ctx.message.forward_sender_name),
     } });
+  });
+  bot.on('text', ctx => {
+    // Never persist or attempt clinical interpretation of the user's freeform text.
+    const command = ctx.message.text.trim().toLowerCase() === 'help' ? 'help' : 'text';
+    accept(ctx, { command });
   });
   bot.on('message', ctx => { accept(ctx, { command: 'unknown' }); });
   // Propagate storage failures so Telegram retries webhook delivery.

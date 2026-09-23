@@ -51,8 +51,10 @@ test('TTL expires answers and queued content; late buttons start safely', t => {
   assert.equal(db.get(10), null);
   assert.equal(db.prune(), 1);
   db.accept(2, 10, { data: old });
-  assert.equal(db.get(10).stage, 'language');
-  assert.equal(db.get(10).lang, null);
+  assert.equal(db.get(10).stage, 'intro');
+  assert.equal(db.get(10).lang, 'en');
+  assert.deepEqual(db.get(10).answers, {});
+  assert.notEqual(db.get(10).nonce, old.split(':')[0]);
 });
 test('a delayed recipient does not block another recipient', t => {
   const db = new Store(':memory:', 'test'); t.after(() => db.close());

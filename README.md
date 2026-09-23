@@ -64,7 +64,9 @@ npm start
 
 Open the bot in Telegram, send `/start`, select **🇰🇭 ភាសាខ្មែរ** or **🇬🇧 English**, then use buttons. Polling works locally without a public URL. Only run **one process per bot token**; polling startup removes any existing webhook for that token. Use a separate development bot when production is running.
 
-Local health endpoints: `http://localhost:3000/healthz` (process alive) and `/readyz` (accepting work, database accessible, and no reply older than two minutes). These checks do not prove end-to-end Telegram connectivity when the queue is empty.
+Local health endpoints: `http://localhost:3000/health` (also `/` and `/healthz`) returns 200 when the web process is alive, including during Telegram initialization. `/readyz` checks initialization, database access, and whether any reply is older than two minutes. These checks do not prove end-to-end Telegram connectivity when the queue is empty. An endpoint alone does not prevent a free host from sleeping; use the always-on Render configuration provided.
+
+Plain text such as “Hi” or “Hello” opens language selection when no session exists. During an assessment it returns friendly button guidance and the current question without discarding answers; `help` also works without a slash. Language callbacks use `<nonce>:<revision>:language:km` or `:en`. Expired language menus (and older `lang_kh`, `lang_km`, `lang_en` buttons) can recover onboarding in one tap. Expired clinical buttons only open a fresh language menu; they never replay an old symptom answer. Callback acknowledgements are awaited with a two-second budget independently of durable reply delivery.
 
 ## Commands
 
@@ -130,6 +132,7 @@ The same Docker image can run on another host with public HTTPS, environment sec
 - **Logging:** structured operational events only. Do not enable Telegraf debug logging, request-body capture, or proxy logging of secrets. No raw message text, names, phone numbers, usernames, or medical records are stored as input. Free text is not clinically analyzed and receives button guidance.
 - **Data protection:** restrict disk access and use host disk encryption. SQLite `secure_delete` and WAL checkpoints reduce remnants but do not guarantee secure erasure from disks, snapshots or backups. Telegram chat history is separate and is not removed by `/cancel`. Do not tell users this is an end-to-end encrypted medical record channel.
 - **Operations:** monitor readiness, `delivery_retry`, `delivery_worker_failed`, `expired_undelivered_messages`, disk space and host restarts. A permanent Telegram 400/401 delivery failure fails the process visibly and preserves the queued item for investigation. A 403 block clears that recipient's local state/queue. Use the host's restart policy; do not leave an invalid payload in an endless restart loop.
+- **Telegram reconnects:** Telegraf retries transient `getUpdates` failures internally. Initialization and polling launch also retry network timeouts/resets, 429s and server failures, logging only `telegram_retry` or `polling_retry` and the delay. Backoff increases from one to sixty seconds (or Telegram's longer `retry_after`). Invalid credentials, a second poller (409), and storage/programming failures still fail visibly. Reconnects do not discard pending Telegram updates. The health server starts before Telegram API initialization.
 - **Scaling:** do not run multiple workers against this SQLite database. For multiple replicas, replace storage with a shared transactional database and implement outbox row claiming/leases and per-user serialization. This implementation is intentionally a single-instance service.
 
 ## Verification and release

@@ -71,10 +71,16 @@ export function transition(current, event) {
   let value = '';
   if (event.data) {
     const parts = event.data.split(':');
-    if (parts.length !== 4 || parts[0] !== s.nonce || parts[1] !== String(s.rev)) {
+    // Language is a preference, so old language menus can safely recover onboarding.
+    // Clinical answers still require the current nonce and revision, without exception.
+    const legacyCode = /^lang_(kh|km|en)$/.exec(event.data)?.[1];
+    const legacyLanguage = legacyCode === 'kh' ? 'km' : legacyCode;
+    const oldLanguage = /^[a-f0-9]{12}:\d+:language:(en|km)$/.test(event.data) ? parts[3] : undefined;
+    if (!s.lang && s.stage === 'language' && (legacyLanguage || oldLanguage)) {
+      action = 'language'; value = legacyLanguage || oldLanguage;
+    } else if (parts.length !== 4 || parts[0] !== s.nonce || parts[1] !== String(s.rev)) {
       return { state: s, messages: current ? [message(locales[s.lang || 'en'].stale), ...render(s)] : render(s) };
-    }
-    [, , action, value] = parts;
+    } else [, , action, value] = parts;
   }
   if (action === 'cancel') {
     return { state: null, clear: true, messages: [message(s.lang ? locales[s.lang].cleared : `${locales.km.cleared}\n\n${locales.en.cleared}`)] };

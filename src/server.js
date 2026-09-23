@@ -11,7 +11,7 @@ export function createApp({ bot, store, mode, webhookSecret, isReady = () => tru
   const app = express();
   app.disable('x-powered-by');
   app.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-  app.get('/healthz', (_req, res) => res.json({ status: 'alive' }));
+  app.get(['/', '/health', '/healthz'], (_req, res) => res.status(200).json({ status: 'alive' }));
   app.get('/readyz', (_req, res) => {
     try {
       const stats = store.stats();

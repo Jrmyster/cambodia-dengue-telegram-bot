@@ -5,6 +5,8 @@ import { createBot } from '../src/bot.js';
 import { createApp } from '../src/server.js';
 import { callback } from '../src/flow.js';
 import { config } from '../src/config.js';
+import { deliveryWorker } from '../src/delivery.js';
+import { locales } from '../locales.js';
 
 const token = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi';
 const secret = 'a'.repeat(48);
@@ -18,13 +20,124 @@ async function setup(t, overrides = {}) {
   const bot = createBot(token, store);
   bot.botInfo = { id: 123456, is_bot: true, username: 'triage_test_bot', first_name: 'Test' };
   bot.telegram.callApi = async () => true;
+  const acknowledgements = [];
+  bot.context.answerCbQuery = async function (text) {
+    await new Promise(resolve => setImmediate(resolve));
+    acknowledgements.push({ id: this.callbackQuery.id, text });
+    return true;
+  };
   const app = createApp({ bot, store, mode: 'webhook', webhookSecret: secret, ...overrides });
   const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   t.after(async () => { await new Promise(r => server.close(r)); store.close(); });
   const url = `http://127.0.0.1:${server.address().port}`;
   const post = (body, auth = secret) => fetch(`${url}/telegram/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': auth }, body: typeof body === 'string' ? body : JSON.stringify(body) });
-  return { store, bot, post, url };
+  return { store, bot, post, url, acknowledgements };
 }
+
+function buttonUpdate(id, data, chat = 55) {
+  return { update_id: id, callback_query: { id: `cb${id}`, chat_instance: 'test', data,
+    from: { id: chat, is_bot: false, first_name: 'Test' },
+    message: { message_id: id, date: 1, chat: { id: chat, type: 'private' }, text: 'question' } } };
+}
+
+async function deliver(store) {
+  const messages = [];
+  let worker;
+  worker = deliveryWorker(store, { sendMessage: async (chat, text, extra) => { messages.push({ chat, text, extra }); } },
+    { sleep: async () => {
+      if (!store.stats().pending) worker.stop();
+      else store.db.prepare('UPDATE outbox SET due=0').run();
+    }, onFatal: () => assert.fail('delivery must succeed') });
+  await worker.done;
+  return messages;
+}
+
+test('/start, both language keyboards and freeform text produce delivered replies', async t => {
+  const { store, post, acknowledgements } = await setup(t);
+  let id = 400;
+  for (const lang of ['en', 'km']) {
+    assert.equal((await post(update(++id))).status, 200);
+    const [menu] = await deliver(store);
+    const buttons = menu.extra.reply_markup.inline_keyboard.flat();
+    const data = buttons.find(b => b.callback_data.endsWith(`:language:${lang}`)).callback_data;
+    assert.equal((await post(buttonUpdate(++id, data))).status, 200);
+    assert.equal(acknowledgements.at(-1).id, `cb${id}`); // HTTP waits for acknowledgement.
+    assert.match((await deliver(store))[0].text, new RegExp(locales[lang].intro.slice(0, 10)));
+    const state = store.get(55);
+    for (const text of ['Hi', 'Hello', 'anything else', '/unknown']) {
+      assert.equal((await post(update(++id, text))).status, 200);
+      const replies = await deliver(store);
+      assert.equal(replies[0].text, locales[lang].fallback);
+      assert.ok(replies[1].extra.reply_markup.inline_keyboard.length > 0);
+      assert.deepEqual(store.get(55), state);
+    }
+    await post(update(++id, ' HELP '));
+    assert.ok((await deliver(store))[0].text.startsWith(locales[lang].help));
+  }
+});
+
+test('greetings before onboarding and after expiry return a usable language menu', async t => {
+  const { store, post } = await setup(t);
+  for (const [id, text] of [[600, 'Hi'], [601, 'Hello']]) {
+    store.db.prepare('UPDATE sessions SET expires=0').run();
+    assert.equal((await post(update(id, text))).status, 200);
+    const [message] = await deliver(store);
+    assert.match(message.text, /Choose your language/);
+    assert.equal(message.extra.reply_markup.inline_keyboard.length, 2);
+    assert.equal(store.get(55).stage, 'language');
+  }
+});
+
+test('expired language callbacks recover in one tap; old clinical callbacks cannot answer', async t => {
+  const { store, post, acknowledgements } = await setup(t);
+  await post(update(700));
+  const oldLanguage = callback(store.get(55), 'language', 'km');
+  store.db.prepare('UPDATE sessions SET expires=0').run();
+  await post(buttonUpdate(701, oldLanguage));
+  assert.equal(store.get(55).lang, 'km');
+  const oldClinical = callback(store.get(55), 'begin');
+  store.db.prepare('UPDATE sessions SET expires=0').run();
+  await post(buttonUpdate(702, oldClinical));
+  assert.equal(store.get(55).stage, 'language');
+  await post(buttonUpdate(703, 'lang_en'));
+  assert.equal(store.get(55).lang, 'en');
+  assert.equal(acknowledgements.length, 3);
+});
+
+test('callback acknowledgements cover duplicates, invalid data and failed storage', async t => {
+  const { store, post, acknowledgements, bot } = await setup(t);
+  const u = buttonUpdate(800, 'lang_kh');
+  await post(u); await post(u);
+  await post(buttonUpdate(801, 'x'.repeat(65)));
+  assert.equal(acknowledgements.length, 3);
+  store.db.exec("CREATE TRIGGER fail_callback BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'simulated'); END");
+  assert.equal((await post(buttonUpdate(802, 'bad'))).status, 503);
+  assert.equal(acknowledgements.length, 4);
+  store.db.exec('DROP TRIGGER fail_callback');
+  bot.context.answerCbQuery = async () => { throw new Error('expired callback'); };
+  assert.equal((await post(buttonUpdate(802, 'bad'))).status, 200);
+  assert.ok(store.stats().pending > 0);
+});
+
+test('an unresponsive acknowledgement cannot stall the webhook or lose its reply', async t => {
+  const { store, post, bot } = await setup(t);
+  bot.context.answerCbQuery = () => new Promise(() => {});
+  assert.equal((await post(buttonUpdate(900, 'lang_en'))).status, 200);
+  assert.equal(store.get(55).lang, 'en');
+  assert.equal(store.stats().pending, 1);
+});
+
+test('health aliases are alive in both modes even while readiness is unavailable', async t => {
+  for (const mode of ['polling', 'webhook']) {
+    const { url } = await setup(t, { mode, isReady: () => false });
+    for (const path of ['/', '/health', '/healthz']) {
+      const response = await fetch(url + path);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { status: 'alive' });
+    }
+    assert.equal((await fetch(`${url}/readyz`)).status, 503);
+  }
+});
 
 test('webhook secret, JSON validation, health and durable duplicate suppression', async t => {
   const { store, post, url } = await setup(t);

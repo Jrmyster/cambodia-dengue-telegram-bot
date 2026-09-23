@@ -74,6 +74,18 @@ test('utility commands work before onboarding and preserve an active assessment'
   assert.deepEqual(transition(s, { command: 'resume' }).messages, render(s));
   assert.equal(transition(s, { command: 'cancel' }).state, null);
 });
+test('free text and old language buttons preserve a current clinical question', () => {
+  for (const lang of ['en', 'km']) {
+    const s = begin(lang);
+    const response = transition(s, { command: 'text' });
+    assert.deepEqual(response.state, s);
+    assert.equal(response.messages[0].text, locales[lang].fallback);
+    assert.deepEqual(response.messages.slice(1), render(s));
+    for (const data of ['lang_kh', 'lang_en', callback(fresh(), 'language', 'en')]) {
+      assert.deepEqual(transition(s, { data }).state, s);
+    }
+  }
+});
 function keys(o, prefix = '') {
   return Object.entries(o).flatMap(([k, v]) => v && typeof v === 'object' ? keys(v, `${prefix}${k}.`) : `${prefix}${k}`);
 }

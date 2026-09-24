@@ -44,3 +44,14 @@ test('shutdown cancels a pending reconnect and prevents another launch', async (
   await assert.rejects(retryTelegram(async () => { calls++; }, { signal: controller.signal }), { name: 'AbortError' });
   assert.equal(calls, 1);
 });
+
+test('polling 409 conflicts cool down before reconnect; other modes remain strict', async () => {
+  let calls = 0;
+  const waits = [], logs = [];
+  await retryTelegram(async () => {
+    if (++calls <= 3) throw { response: { error_code: 409 } };
+  }, { retryConflicts: true, sleep: async ms => waits.push(ms), log: line => logs.push(JSON.parse(line)) });
+  assert.equal(calls, 4);
+  assert.deepEqual(waits, [30000, 30000, 30000]);
+  assert.ok(logs.every(entry => entry.event === 'polling_conflict'));
+});

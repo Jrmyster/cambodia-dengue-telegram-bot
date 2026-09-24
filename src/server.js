@@ -16,7 +16,8 @@ export function createApp({ bot, store, mode, webhookSecret, isReady = () => tru
     try {
       const stats = store.stats();
       const ready = isReady() && (!stats.oldest || Date.now() - stats.oldest < 120000);
-      res.status(ready ? 200 : 503).json({ status: ready ? 'ready' : 'not_ready' });
+      res.status(ready ? 200 : 503).json({ status: ready ? 'ready' : 'not_ready',
+        storage: stats.storage || 'persistent', transport: mode, bot_username: bot.botInfo?.username || null });
     } catch { res.status(503).json({ status: 'not_ready' }); }
   });
   if (mode === 'webhook') {
@@ -28,7 +29,8 @@ export function createApp({ bot, store, mode, webhookSecret, isReady = () => tru
     }, express.json({ limit: '64kb', strict: true }), async (req, res) => {
       if (!req.body || !Number.isSafeInteger(req.body.update_id) || req.body.update_id < 0) return res.sendStatus(400);
       try {
-        // No Telegram response shortcut: HTTP 200 means the DB transaction committed.
+        // HTTP 200 means the update was accepted by the active store or recovery
+        // guidance was sent. Memory fallback is explicitly reported by /readyz.
         await bot.handleUpdate(req.body);
         res.sendStatus(200);
       } catch {

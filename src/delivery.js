@@ -16,17 +16,17 @@ export function deliveryWorker(store, telegram, { onFatal, log = console.error, 
         const { text, extra } = JSON.parse(row.payload);
         try {
           await telegram.sendMessage(row.chat, text, extra);
-          store.delivered(row.id);
-          store.db.prepare('UPDATE outbox SET due=MAX(due,?) WHERE key=?').run(Date.now() + 1100, row.key);
+          store.delivered(row.id, row.generation);
+          store.postpone(row.key, 1100, row.generation);
           await sleep(60); // Under Telegram's approximate global message ceiling.
         } catch (error) {
           const code = error.response?.error_code;
-          if (code === 403) { store.forget(row.key); continue; }
+          if (code === 403) { store.forget(row.key, row.generation); continue; }
           if (code === 400 || code === 401) throw new Error('Permanent delivery configuration failure');
           const backoff = code === 429
             ? Math.max(1000, Number(error.response?.parameters?.retry_after || 1) * 1000)
             : Math.min(60000, 1000 * 2 ** Math.min(row.attempts, 6));
-          store.retry(row.id, backoff);
+          store.retry(row.id, backoff, row.generation);
           log(JSON.stringify({ event: 'delivery_retry', code: Number.isInteger(code) ? code : 'network' }));
           if (code === 429) await sleep(backoff); // Applies to the whole bot, not just one chat.
         }

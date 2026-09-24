@@ -7,6 +7,7 @@ export const common = {
 
 export const locales = {
   en: {
+    recovery: 'An error occurred. Please tap /start to restart. For urgent help, call 119 or go to hospital now.',
     yes: 'Yes', no: 'No', unsure: 'Not sure',
     begin: 'Begin assessment', restart: 'New assessment', resume: 'Continue assessment',
     emergency: '🚑 Emergency contacts', prevention: '🦟 Prevention', cancel: 'Cancel / clear answers',
@@ -66,6 +67,7 @@ export const locales = {
     commandDescriptions: ['Start / choose language', 'Continue assessment', 'Dengue prevention', 'Emergency referral contacts', 'Clear active answers', 'Help', 'Optional coarse location report', 'Health Center referral guidance'],
   },
   km: {
+    recovery: 'មានបញ្ហាកើតឡើង។ សូមចុច /start ដើម្បីចាប់ផ្តើមឡើងវិញ។ សម្រាប់ជំនួយបន្ទាន់ សូមហៅ 119 ឬទៅមន្ទីរពេទ្យឥឡូវនេះ។',
     yes: 'មាន / បាទ ឬ ចាស', no: 'គ្មាន / ទេ', unsure: 'មិនប្រាកដ',
     begin: 'ចាប់ផ្តើមវាយតម្លៃ', restart: 'វាយតម្លៃថ្មី', resume: 'បន្តការវាយតម្លៃ',
     emergency: '🚑 ទំនាក់ទំនងសង្គ្រោះបន្ទាន់', prevention: '🦟 ការបង្ការ', cancel: 'បោះបង់ / លុបចម្លើយ',

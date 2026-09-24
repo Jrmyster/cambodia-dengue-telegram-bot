@@ -1,12 +1,13 @@
 import 'dotenv/config';
 import { config } from './src/config.js';
-import { Store } from './src/store.js';
+import { ResilientStore } from './src/resilient-store.js';
 import { createBot, registerCommands } from './src/bot.js';
 import { createApp } from './src/server.js';
 import { deliveryWorker } from './src/delivery.js';
 import { retryTelegram } from './src/retry.js';
+import { installProcessErrorHandlers } from './src/process-errors.js';
 
-let server, store, bot, worker, pollingDone, ready = false, closing = false, polling = false;
+let server, store, bot, worker, pollingDone, ready = false, closing = false, polling = false, initializing = true;
 const lifetime = new AbortController();
 async function shutdown(code = 0) {
   if (closing) return;
@@ -20,15 +21,20 @@ async function shutdown(code = 0) {
   await worker?.done;
   await pollingDone;
   store?.close();
-  clearTimeout(deadline);
+  // Keep the shutdown deadline if an initialization API request is still pending.
+  if (!initializing) clearTimeout(deadline);
   process.exitCode = code;
 }
 process.once('SIGINT', () => { void shutdown(); });
 process.once('SIGTERM', () => { void shutdown(); });
+installProcessErrorHandlers({
+  onStorageFailure: () => { if (!store) throw new Error('Storage unavailable'); store.useMemory(); },
+  onFatal: () => { void shutdown(1).catch(() => process.exit(1)); },
+});
 
 try {
   const c = config();
-  store = new Store(c.databasePath, c.sessionSecret, c.ttlMinutes * 60000);
+  store = new ResilientStore(c.databasePath, c.sessionSecret, c.ttlMinutes * 60000);
   bot = createBot(c.token, store);
   const app = createApp({ bot, store, mode: c.mode, webhookSecret: c.webhookSecret, isReady: () => ready });
   server = await new Promise((resolve, reject) => {
@@ -51,17 +57,17 @@ try {
     polling = true;
     // launch() removes an old webhook; exactly one polling process per token.
     pollingDone = retryTelegram(() => bot.launch({ dropPendingUpdates: false, allowedUpdates: ['message', 'callback_query'] }),
-      { ...retryOptions, event: 'polling_retry' }).catch(() => {
+      { ...retryOptions, event: 'polling_retry', retryConflicts: true }).catch(() => {
       if (closing) return;
       console.error(JSON.stringify({ event: 'polling_failed' }));
       void shutdown(1);
     });
   }
-  console.log(JSON.stringify({ event: 'started', mode: c.mode, port: c.port }));
+  console.log(JSON.stringify({ event: 'started', mode: c.mode, port: c.port, bot_username: bot.botInfo.username, storage: store.mode }));
 } catch (error) {
   if (!closing) {
     // Never log Telegraf errors/URLs: they may include the bot token or patient data.
     console.error(JSON.stringify({ event: 'startup_failed', reason: /^(Configure |Invalid |Use a separate |SESSION_|PUBLIC_URL|BOT_MODE)/.test(error.message) ? error.message : 'Check configuration, network and persistent disk' }));
     await shutdown(1);
   }
-}
+} finally { initializing = false; }

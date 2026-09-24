@@ -7,6 +7,10 @@ import { callback } from '../src/flow.js';
 import { config } from '../src/config.js';
 import { deliveryWorker } from '../src/delivery.js';
 import { locales } from '../locales.js';
+import { ResilientStore } from '../src/resilient-store.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const token = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi';
 const secret = 'a'.repeat(48);
@@ -16,10 +20,12 @@ function update(id, text = '/start', chat = 55, type = 'private') {
     chat: { id: chat, type }, from: { id: chat, is_bot: false, first_name: 'not retained' } } };
 }
 async function setup(t, overrides = {}) {
-  const store = new Store(':memory:', 'test');
+  const store = overrides.store || new Store(':memory:', 'test');
   const bot = createBot(token, store);
   bot.botInfo = { id: 123456, is_bot: true, username: 'triage_test_bot', first_name: 'Test' };
   bot.telegram.callApi = async () => true;
+  const recoveryReplies = [];
+  bot.context.reply = async text => { recoveryReplies.push(text); return true; };
   const acknowledgements = [];
   bot.context.answerCbQuery = async function (text) {
     await new Promise(resolve => setImmediate(resolve));
@@ -31,7 +37,7 @@ async function setup(t, overrides = {}) {
   t.after(async () => { await new Promise(r => server.close(r)); store.close(); });
   const url = `http://127.0.0.1:${server.address().port}`;
   const post = (body, auth = secret) => fetch(`${url}/telegram/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': auth }, body: typeof body === 'string' ? body : JSON.stringify(body) });
-  return { store, bot, post, url, acknowledgements };
+  return { store, bot, post, url, acknowledgements, recoveryReplies };
 }
 
 function buttonUpdate(id, data, chat = 55) {
@@ -111,7 +117,7 @@ test('callback acknowledgements cover duplicates, invalid data and failed storag
   await post(buttonUpdate(801, 'x'.repeat(65)));
   assert.equal(acknowledgements.length, 3);
   store.db.exec("CREATE TRIGGER fail_callback BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'simulated'); END");
-  assert.equal((await post(buttonUpdate(802, 'bad'))).status, 503);
+  assert.equal((await post(buttonUpdate(802, 'bad'))).status, 200); // Recovery guidance delivered.
   assert.equal(acknowledgements.length, 4);
   store.db.exec('DROP TRIGGER fail_callback');
   bot.context.answerCbQuery = async () => { throw new Error('expired callback'); };
@@ -228,12 +234,62 @@ test('groups, edited messages and channel posts cannot collect clinical data', a
   await post({ update_id: 3, channel_post: update(3).message });
   assert.equal(store.stats().pending, 0);
 });
-test('failed transaction returns 503 and is retriable', async t => {
-  const { store, post } = await setup(t);
+test('failed transaction returns 503 when recovery cannot send and is retriable', async t => {
+  const { store, post, bot } = await setup(t);
+  bot.context.reply = async () => { throw new Error('network unavailable'); };
   store.db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'simulated'); END");
   assert.equal((await post(update(1))).status, 503);
   store.db.exec('DROP TRIGGER fail_insert');
   assert.equal((await post(update(1))).status, 200);
+});
+test('unexpected middleware errors send bilingual recovery and the next /start works', async t => {
+  const { store, post, recoveryReplies } = await setup(t);
+  const original = store.accept;
+  store.accept = () => { throw new TypeError('private error detail'); };
+  assert.equal((await post(update(950))).status, 200);
+  assert.equal(recoveryReplies.length, 1);
+  assert.ok(recoveryReplies[0].includes(locales.en.recovery));
+  assert.ok(recoveryReplies[0].includes(locales.km.recovery));
+  assert.ok(!recoveryReplies[0].includes('private error detail'));
+  store.accept = original;
+  assert.equal((await post(update(951))).status, 200);
+  assert.match((await deliver(store))[0].text, /Choose your language/);
+});
+
+test('/start resets corrupt JSON through real middleware without needing the error handler', async t => {
+  const { store, post, recoveryReplies } = await setup(t);
+  await post(update(960));
+  store.db.prepare("UPDATE sessions SET state='invalid JSON'").run();
+  assert.equal((await post(update(961))).status, 200);
+  assert.equal(store.get(55).stage, 'language');
+  assert.equal(recoveryReplies.length, 0);
+  assert.equal(store.stats().pending, 1);
+});
+
+test('/start survives read-only storage and delivers from memory; language selection still works', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'dengue-fallback-http-'));
+  const store = new ResilientStore(join(dir, 'bot.sqlite'), 'test', undefined, { log: () => {} });
+  const { post, url } = await setup(t, { store });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  store.active.db.exec('PRAGMA query_only=ON');
+  assert.equal((await post(update(970))).status, 200);
+  assert.equal(store.mode, 'memory');
+  const sendOne = async () => {
+    let worker, sent;
+    worker = deliveryWorker(store, { sendMessage: async (_chat, text) => { sent = text; } },
+      { sleep: async () => worker.stop(), onFatal: () => assert.fail('worker must survive') });
+    await worker.done; return sent;
+  };
+  assert.match(await sendOne(), /Choose your language/);
+  assert.equal((await post(buttonUpdate(971, callback(store.get(55), 'language', 'km')))).status, 200);
+  assert.ok((await sendOne()).startsWith(locales.km.intro));
+  assert.equal(store.stats().pending, 0);
+  const ready = await fetch(`${url}/readyz`);
+  assert.equal(ready.status, 200);
+  const status = await ready.json();
+  assert.equal(status.storage, 'memory');
+  assert.equal(status.transport, 'webhook');
+  assert.equal(status.bot_username, 'triage_test_bot');
 });
 test('not ready responds 503 before accepting work', async t => {
   const { store, post, url } = await setup(t, { isReady: () => false });

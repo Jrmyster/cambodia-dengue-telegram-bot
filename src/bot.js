@@ -1,7 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { common, locales } from '../locales.js';
 
-export function createBot(token, store) {
+export function createBot(token, store, { log = console.error } = {}) {
   const bot = new Telegraf(token, { handlerTimeout: 10000, telegram: { webhookReply: false } });
   bot.use(async (ctx, next) => {
     if (!ctx.chat || ctx.chat.type !== 'private' || !ctx.from || ctx.from.id !== ctx.chat.id) return;
@@ -49,8 +49,24 @@ export function createBot(token, store) {
     accept(ctx, { command });
   });
   bot.on('message', ctx => { accept(ctx, { command: 'unknown' }); });
-  // Propagate storage failures so Telegram retries webhook delivery.
-  bot.catch(error => { throw error; });
+  bot.catch(async (_error, ctx) => {
+    log(JSON.stringify({ event: 'bot_update_failed' }));
+    if (ctx.chat?.type !== 'private' || ctx.from?.id !== ctx.chat.id) return;
+    // Bypass the outbox so a second database failure cannot hide recovery guidance.
+    // The bilingual response needs no session read and contains no patient data.
+    let timer;
+    try {
+      await Promise.race([
+        ctx.reply(`${locales.km.recovery}\n\n${locales.en.recovery}`),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Recovery timeout')), 2000); }),
+      ]);
+    } catch {
+      log(JSON.stringify({ event: 'bot_recovery_delivery_failed' }));
+      // Webhooks return 503 for retry if even the recovery response could not send.
+      // Polling's supervisor retries this sanitized transport failure as well.
+      throw Object.assign(new Error('Recovery delivery unavailable'), { code: 'ETIMEDOUT' });
+    } finally { clearTimeout(timer); }
+  });
   return bot;
 }
 

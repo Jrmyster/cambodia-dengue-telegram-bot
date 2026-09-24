@@ -11,7 +11,8 @@ export class Store {
   constructor(path, secret, ttl = 1800000, now = Date.now) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path); this.secret = secret; this.ttl = ttl; this.now = now;
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA secure_delete=ON;
+    try {
+      this.db.exec(`PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS sessions (key TEXT PRIMARY KEY, state TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS updates (id INTEGER PRIMARY KEY, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, chat TEXT NOT NULL,
@@ -33,6 +34,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS analytics_dedup (
         daily_hash TEXT PRIMARY KEY CHECK(length(daily_hash)=64), expires INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS analytics_dedup_expiry ON analytics_dedup(expires);`);
+      // Exercise a write transaction as the actual runtime user, including WAL access.
+      this.db.exec('BEGIN IMMEDIATE; COMMIT');
+    } catch (error) { this.db.close(); throw error; }
   }
   key(chatId) { return createHmac('sha256', this.secret).update(String(chatId)).digest('hex'); }
   get(chatId) {
@@ -71,11 +75,14 @@ export class Store {
       if (this.db.prepare('SELECT 1 FROM updates WHERE id=?').get(updateId)) { this.db.exec('COMMIT'); return 'duplicate'; }
       this.db.prepare('INSERT INTO updates VALUES (?,?)').run(updateId, now + 2 * DAY);
       const limit = this.db.prepare('SELECT * FROM limits WHERE key=? AND expires>?').get(key, now);
-      // Emergency/cancel always bypass the per-chat burst cap. Telegram remains the outer rate limiter.
-      const privileged = event.command === 'emergency' || event.command === 'cancel' || /:(emergency|area|cancel):/.test(event.data || '') || /:warning:yes$/.test(event.data || '');
+      // Recovery must remain available after a burst of failed/repeated taps.
+      const privileged = ['start', 'emergency', 'cancel'].includes(event.command) || /:(start|emergency|area|cancel):/.test(event.data || '') || /:warning:yes$/.test(event.data || '');
       if (limit?.count >= 40 && !privileged) { this.db.exec('COMMIT'); return 'limited'; }
-      this.db.prepare('INSERT OR REPLACE INTO limits VALUES (?,?,?)').run(key, (limit?.count || 0) + 1, limit?.expires || now + 60000);
-      const previous = this.get(chatId);
+      this.db.prepare('INSERT OR REPLACE INTO limits VALUES (?,?,?)').run(key,
+        event.command === 'start' ? 1 : (limit?.count || 0) + 1,
+        event.command === 'start' ? now + 60000 : limit?.expires || now + 60000);
+      // /start must not deserialize potentially corrupt or obsolete session JSON.
+      const previous = event.command === 'start' ? null : this.get(chatId);
       const result = transition(previous, event);
       this.recordAnalytics(chatId, now, result);
       if (result.clear || (result.state?.result === 'red' && previous?.result !== 'red')) this.db.prepare('DELETE FROM outbox WHERE key=?').run(key);
@@ -88,7 +95,10 @@ export class Store {
         this.db.prepare('INSERT INTO outbox (key,chat,payload,due,created) VALUES (?,?,?,?,?)').run(key, String(chatId), JSON.stringify(m), now, now);
       }
       this.db.exec('COMMIT'); return 'accepted';
-    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
   next() {
     // Preserve order within each chat; a blocked chat cannot block all other chats.
@@ -96,6 +106,7 @@ export class Store {
       (SELECT 1 FROM outbox p WHERE p.key=o.key AND p.id<o.id) ORDER BY o.id LIMIT 1`).get(this.now());
   }
   delivered(id) { this.db.prepare('DELETE FROM outbox WHERE id=?').run(id); }
+  postpone(key, delay) { this.db.prepare('UPDATE outbox SET due=MAX(due,?) WHERE key=?').run(this.now() + delay, key); }
   retry(id, delay) { this.db.prepare('UPDATE outbox SET attempts=attempts+1,due=? WHERE id=?').run(this.now() + delay, id); }
   forget(key) {
     this.db.prepare('DELETE FROM sessions WHERE key=?').run(key);

@@ -66,6 +66,10 @@ function finish(s, result) {
 
 // Synchronous pure transition: only Store applies/persists its output atomically.
 export function transition(current, event) {
+  if (event.command === 'start') {
+    const state = fresh();
+    return { state, clear: true, messages: render(state) };
+  }
   let s = current ? structuredClone(current) : fresh();
   let action = event.command;
   let value = '';

@@ -69,4 +69,28 @@ test('burst cap never suppresses emergency or cancel commands', t => {
   assert.equal(db.accept(40, 10, { command: 'help' }), 'limited');
   assert.equal(db.accept(41, 10, { command: 'emergency' }), 'accepted');
   assert.equal(db.accept(42, 10, { command: 'cancel' }), 'accepted');
+  assert.equal(db.accept(43, 10, { command: 'start' }), 'accepted');
+  assert.equal(db.stats().pending, 1);
+  assert.equal(db.accept(44, 10, { data: callback(db.get(10), 'language', 'en') }), 'accepted');
+  assert.equal(db.get(10).lang, 'en');
+});
+
+test('/start resets every stage and malformed state without deserializing old answers', t => {
+  const db = new Store(':memory:', 'test'); t.after(() => db.close());
+  let id = 100;
+  db.accept(id++, 10, { command: 'start' });
+  for (const stage of ['language', 'intro', 'fever', 'duration', 'warning', 'vulnerable', 'hydration', 'result']) {
+    const old = db.get(10);
+    db.db.prepare('UPDATE sessions SET state=?').run(JSON.stringify({ ...old, stage, lang: 'km', answers: { stale: true }, locationRequest: { step: 'pin' } }));
+    assert.equal(db.accept(id++, 10, { command: 'start' }), 'accepted');
+    const current = db.get(10);
+    assert.equal(current.stage, 'language'); assert.equal(current.lang, null);
+    assert.notEqual(current.nonce, old.nonce); assert.deepEqual(current.answers, {});
+    assert.equal(current.locationRequest, undefined); assert.equal(db.stats().pending, 1);
+  }
+  for (const state of ['invalid JSON', 'null', '{"lang":"unsupported"}']) {
+    db.db.prepare('UPDATE sessions SET state=?').run(state);
+    assert.equal(db.accept(id++, 10, { command: 'start' }), 'accepted');
+    assert.equal(db.get(10).stage, 'language');
+  }
 });

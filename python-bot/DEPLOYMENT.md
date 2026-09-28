@@ -21,7 +21,7 @@ The Python version keeps sessions in memory for 30 minutes of inactivity, with p
 
 ## 1. Prepare and test locally
 
-Use Python 3.11 or later. All **14 tests passed** here with Python 3.12.14 and PTB 22.8, and `pip check` reported no broken dependencies. Python 3.11.0 was not available in this local environment; verify the chosen Render interpreter in its build logs. Real Telegram replies and Render's Python deployment have not yet been tested; use the acceptance checklist after cutover.
+Use Python 3.11 or later. All **15 tests passed** here with Python 3.12.14 and PTB 22.8, and `pip check` reported no broken dependencies. Python 3.11.0 was not available in this local environment; verify the chosen Render interpreter in its build logs. Use the acceptance checklist after cutover to verify live Telegram replies and the Render deployment.
 
 From the Git repository root (`outputs/dengue-telegram-bot` in this workspace):
 
@@ -146,11 +146,13 @@ Recommended: **New → Background Worker**, connected to `Jrmyster/cambodia-deng
 
 Python 3.11.0 is an old initial patch release. For production, prefer a current security-patched 3.11 release supported by Render and verify it with the same tests. The exact requested setting is shown above; dependency installation and runtime logs must confirm it works on the selected Render runtime.
 
-The new variable is **`TELEGRAM_TOKEN`**, not the Node version's `TELEGRAM_BOT_TOKEN`. Copy the token through Render's secret editor. This Python app always polls; `BOT_MODE`, `PUBLIC_URL`, `WEBHOOK_SECRET`, `DATABASE_PATH`, and `SESSION_KEY_SECRET` from the Node service do not configure it.
+The preferred variable is **`TELEGRAM_TOKEN`**. If it is unset or blank, the app accepts the existing Node service's `TELEGRAM_BOT_TOKEN`, so an in-place migration does not need to expose or copy its secret. This Python app always polls; `BOT_MODE`, `PUBLIC_URL`, `WEBHOOK_SECRET`, `DATABASE_PATH`, and `SESSION_KEY_SECRET` from the Node service do not configure it.
 
 Do not configure an HTTP health check for a Background Worker. It has no public URL. There is no database disk required for this memory-only Python version.
 
 ### Web Service alternative
+
+For the existing Docker Web Service, an in-place testing cutover is available: disable Auto-Deploy, publish the code, suspend the old deployment, set Dockerfile Path to `./python-bot/Dockerfile`, keep the build context `.` and Root Directory blank, and set Health Check Path to `/health`. Leave Docker Command blank. Resume and deploy the new image only after the old process has stopped. This image uses the maintained Python 3.11 image (the `PYTHON_VERSION` environment variable does not control Docker), enables the health listener by default, and can reuse `TELEGRAM_BOT_TOKEN`. It copies only requirements and application code into the image. No new service or paid upgrade is required. The Free plan still sleeps and is suitable only for testing. To roll back, suspend Python, restore Dockerfile Path `./Dockerfile` and the original health check, then deploy Node again. Do not delete any existing data.
 
 Create a **new native Python Web Service** using the same branch/root/build/start settings and one always-on instance. Set `ENABLE_HEALTH_SERVER=true`. Render supplies `PORT`; the included health listener binds `0.0.0.0:$PORT`. Set Health Check Path to `/health`. Do not set a fixed port over Render's value.
 

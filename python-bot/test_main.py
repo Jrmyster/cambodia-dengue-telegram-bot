@@ -183,6 +183,20 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LogicTests(unittest.TestCase):
+    def test_existing_render_token_is_used_without_starting_another_poller(self):
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": TOKEN}, clear=True), \
+                patch.object(main, "build_application") as build, \
+                patch.object(main, "configure_logging"):
+            self.assertEqual(main.main(), 0)
+            build.assert_called_once_with(TOKEN)
+            build.return_value.run_polling.assert_called_once()
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": TOKEN,
+                                       "TELEGRAM_TOKEN": TOKEN + "B"}, clear=True), \
+                patch.object(main, "build_application") as build, \
+                patch.object(main, "configure_logging"):
+            self.assertEqual(main.main(), 0)
+            build.assert_called_once_with(TOKEN + "B")
+
     def test_optional_health_listener_is_liveness_only(self):
         server = main.ThreadingHTTPServer(("127.0.0.1", 0), main.HealthHandler)
         thread = Thread(target=server.serve_forever, daemon=True)

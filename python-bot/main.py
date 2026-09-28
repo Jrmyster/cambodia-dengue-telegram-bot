@@ -483,7 +483,9 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+    # Preserve the existing Render secret when cutting over from the Node service.
+    token = (os.environ.get("TELEGRAM_TOKEN", "").strip()
+             or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
     configure_logging(token)
     server = None
     loop = None
